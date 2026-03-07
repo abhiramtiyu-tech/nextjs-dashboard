@@ -1,10 +1,11 @@
-import bcrypt from 'bcrypt';
 import postgres from 'postgres';
 import { invoices, customers, revenue, users } from '../lib/placeholder-data';
 
-const sql = postgres(process.env.POSTGRES_URL!, { ssl: 'require' });
+export const runtime = 'nodejs';
 
-async function seedUsers() {
+type SqlClient = ReturnType<typeof postgres>;
+
+async function seedUsers(sql: SqlClient) {
   await sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`;
   await sql`
     CREATE TABLE IF NOT EXISTS users (
@@ -15,9 +16,11 @@ async function seedUsers() {
     );
   `;
 
+  const { hash } = await import('bcryptjs');
+
   const insertedUsers = await Promise.all(
     users.map(async (user) => {
-      const hashedPassword = await bcrypt.hash(user.password, 10);
+      const hashedPassword = await hash(user.password, 10);
       return sql`
         INSERT INTO users (id, name, email, password)
         VALUES (${user.id}, ${user.name}, ${user.email}, ${hashedPassword})
@@ -29,7 +32,7 @@ async function seedUsers() {
   return insertedUsers;
 }
 
-async function seedInvoices() {
+async function seedInvoices(sql: SqlClient) {
   await sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`;
 
   await sql`
@@ -55,7 +58,7 @@ async function seedInvoices() {
   return insertedInvoices;
 }
 
-async function seedCustomers() {
+async function seedCustomers(sql: SqlClient) {
   await sql`CREATE EXTENSION IF NOT EXISTS "uuid-ossp"`;
 
   await sql`
@@ -80,7 +83,7 @@ async function seedCustomers() {
   return insertedCustomers;
 }
 
-async function seedRevenue() {
+async function seedRevenue(sql: SqlClient) {
   await sql`
     CREATE TABLE IF NOT EXISTS revenue (
       month VARCHAR(4) NOT NULL UNIQUE,
@@ -102,16 +105,30 @@ async function seedRevenue() {
 }
 
 export async function GET() {
+  const connectionString = process.env.POSTGRES_URL;
+
+  if (!connectionString) {
+    return Response.json(
+      { error: 'Missing POSTGRES_URL environment variable' },
+      { status: 500 },
+    );
+  }
+
+  const sql = postgres(connectionString, { ssl: 'require' });
+
   try {
-    const result = await sql.begin((sql) => [
-      seedUsers(),
-      seedCustomers(),
-      seedInvoices(),
-      seedRevenue(),
-    ]);
+    await sql.begin(async (tx) => {
+      await seedUsers(tx as SqlClient);
+      await seedCustomers(tx as SqlClient);
+      await seedInvoices(tx as SqlClient);
+      await seedRevenue(tx as SqlClient);
+    });
 
     return Response.json({ message: 'Database seeded successfully' });
   } catch (error) {
-    return Response.json({ error }, { status: 500 });
+    const message = error instanceof Error ? error.message : String(error);
+    return Response.json({ error: message }, { status: 500 });
+  } finally {
+    await sql.end({ timeout: 5 });
   }
 }
